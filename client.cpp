@@ -20,10 +20,10 @@ struct MovePacket
 {
     uint16_t size; // 2 byte
     uint16_t type; // 2 byte
-    uint16_t idlen;
-    char id[MAXIDLEN];
-    uint16_t x;  // 4 byte
-    uint16_t y;  // 4 byte
+    uint16_t idlen; // 2 byte
+    char id[MAXIDLEN]; // max 10 byte
+    uint16_t x;  // 2 byte
+    uint16_t y;  // 2 byte
 };
 #pragma pack(pop)
 
@@ -145,7 +145,7 @@ int main(int argc, char** argv)
     playerPacket.x = htons(10);
     playerPacket.y = htons(10);
     playerPacket.idlen = htons(strlen(argv[1]));
-    memset(playerPacket.id,0,sizeof(playerPacket.id));
+    memset(playerPacket.id,'\0',sizeof(playerPacket.id));
     memcpy(playerPacket.id,argv[1],strlen(argv[1]));
     int bytesend = sendall(sockfd,reinterpret_cast<char*>(&playerPacket),10+strlen(argv[1]));
     std::cout << "send byte: " << bytesend << "\n";
