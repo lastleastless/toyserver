@@ -68,6 +68,7 @@ struct consumeStruct
 
 packet structure: 2byte 2byte 2byte 10byte 2byte 2byte -> 20byte
 */
+#pragma pack(push,1)
 struct MovePacket
 {
 	uint16_t size;
@@ -77,6 +78,7 @@ struct MovePacket
 	uint16_t x;
 	uint16_t y;
 };
+#pragma pack(pop)
 
 struct Player
 {
@@ -346,7 +348,7 @@ int main(int argc,char** argv)
 				char id[MAXIDLEN+1];
 				memset(&id,0,sizeof(id));
 				memcpy(&id,buffer+offset,pidlen);
-				offset+=pidlen;
+				offset+=10;
 				id[pidlen] = '\0';
 				uint16_t x;
 				memcpy(&x,buffer+offset,2);
@@ -357,7 +359,7 @@ int main(int argc,char** argv)
 				int xlocation = ntohs(x);
 				int ylocation = ntohs(y);
 				std::cout << "id: " << id << "\n";
-				std::cout << "Location: " << x << "," << ylocation << "\n";
+				std::cout << "Location: " << xlocation << "," << ylocation << "\n";
 			}
 
 		}

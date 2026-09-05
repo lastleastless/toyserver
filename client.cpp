@@ -140,14 +140,14 @@ int main(int argc, char** argv)
     fcntl(sockfd, F_SETFL , O_NONBLOCK);
     freeaddrinfo(servinfo);
     struct MovePacket playerPacket;
-    playerPacket.size = htons(10+strlen(argv[1]));
+    playerPacket.size = htons(20);
     playerPacket.type = htons(1);
     playerPacket.x = htons(10);
     playerPacket.y = htons(10);
     playerPacket.idlen = htons(strlen(argv[1]));
     memset(playerPacket.id,'\0',sizeof(playerPacket.id));
     memcpy(playerPacket.id,argv[1],strlen(argv[1]));
-    int bytesend = sendall(sockfd,reinterpret_cast<char*>(&playerPacket),10+strlen(argv[1]));
+    int bytesend = sendall(sockfd,reinterpret_cast<char*>(&playerPacket),20);
     std::cout << "send byte: " << bytesend << "\n";
     std::cout << "packet information:(" << ntohs(playerPacket.size) <<"," << ntohs(playerPacket.type) <<"," << ntohs(playerPacket.idlen) << "," << std::string(playerPacket.id,strnlen(playerPacket.id,10)) << "," << ntohs(playerPacket.x) << "," << ntohs(playerPacket.y) << ")\n";
     std::cout << "Successfully connect to server.\n";
