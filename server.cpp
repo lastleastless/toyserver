@@ -6,18 +6,18 @@
 #include <string>
 #include <cerrno>
 #include <fcntl.h>
-#include <pthread.h>
 #include <vector>
 #include <queue>
 #include <unistd.h>
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <utility>
 #include <string.h>
 #include <sys/event.h>
 #include <sys/types.h>
 #include <sys/time.h>
-
+#include <thread>
 
 
 #define MAXEVENTS 20
@@ -30,6 +30,13 @@
 #define MAXPACKETSIZE (2+2+MAXIDLEN+2+MAXPACKETLEN)
 #define HEIGHT_LIMIT 900
 #define WIDTH_LIMIT 900
+
+std::mutex m;
+std::mutex list_m;
+std::condition_variable fill;
+std::condition_variable empty;
+bool isempty = false;
+bool isfill = false;
 
 /* PACKET STRUCTURE
 
@@ -79,14 +86,7 @@ struct MovePacket
 	uint16_t y;
 };
 #pragma pack(pop)
-
-struct Player
-{
-	char user_id[MAXIDLEN+1];
-	int x;
-	int y;
-};
-
+/*
 int add_to_fdlist(int fd,std::vector<int> fdlist, int* fd_count)
 {
     int size = fdlist.capacity();
@@ -107,11 +107,11 @@ void delete_from_fdlist(std::vector<int> fdlist, int idx,int* fd_count)
     std::swap(fdlist[idx],fdlist[(*fd_count) - 1]);
 	fdlist.pop_back();
 	(*fd_count)--;
-	if((*fd_count) == 0)
+	if((*fd_count) == 1)
 		return;
 	std::swap(fdlist[idx] , fdlist[(*fd_count) - 1]);
 }
-
+*/
 int sendall(int s,char* packet,int len)
 {
 	int total = 0;
@@ -180,6 +180,22 @@ void* get_in_addr(struct sockaddr* sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+void* consumer(std::queue<std::unique_ptr<MovePacket>>& taskQueue)
+{
+	while(1)
+	{
+		std::unique_lock<std::mutex>lock(m);
+		while(taskQueue.size() == 0)
+			fill.wait(lock,[]{return isfill;});
+		std::cout << "worker get Packet!\n";
+		taskQueue.pop();
+		std::cout << "work done, current queue size:" << taskQueue.size() << "\n";
+		isempty = true;
+		isfill = false;
+		empty.notify_one();
+		lock.unlock();
+	}
+}
 
 int main(int argc,char** argv)
 {
@@ -192,6 +208,7 @@ int main(int argc,char** argv)
     int status;
 	int listener_fd;
 	int fd_count = 0;
+	int taskCount = 0;
 	uint32_t uniquePlayerId = 1;
     char ipv6str[INET6_ADDRSTRLEN];
     char ipv4str[INET_ADDRSTRLEN];
@@ -201,12 +218,14 @@ int main(int argc,char** argv)
     struct addrinfo hints, *servinfo, *p;
 	struct sockaddr_storage their_addr;
 	socklen_t sin_size;
+	
 
 	memset(&hints,0,sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
-
+	std::queue<std::unique_ptr<struct MovePacket>> taskQueue;
+	std::thread t(consumer,std::ref(taskQueue));
     if((status = getaddrinfo(NULL,PORT,&hints,&servinfo))==-1)
 	{
 		std::cerr << "getaddrinfo error: " << gai_strerror(status) << "\n";
@@ -242,11 +261,12 @@ int main(int argc,char** argv)
 	}
 	fcntl(listener_fd, F_SETFL, O_NONBLOCK);
 	std::cout << "server: waiting for connections..\n";
-	if(add_to_fdlist(listener_fd,fdlist,&fd_count) == -1)
+	/*if(add_to_fdlist(listener_fd,fdlist,&fd_count) == -1)
 	{
 		std::cerr << "fail to get fdlist.\n";
 		exit(1);
 	}
+	*/
 	freeaddrinfo(servinfo);
 	int kq = kqueue();
 	if(kq == -1)
@@ -294,7 +314,7 @@ int main(int argc,char** argv)
 					}
 				}
 				fcntl(newfd,F_SETFL,O_NONBLOCK);
-				add_to_fdlist(newfd,fdlist,&fd_count);
+				//add_to_fdlist(newfd,fdlist,&fd_count);
 				EV_SET(&ChangeList,newfd,EVFILT_READ,EV_ADD | EV_CLEAR , 0,0,NULL);
 				if(kevent(kq,&ChangeList,1,NULL,0,NULL) == -1)
 				{
@@ -306,6 +326,7 @@ int main(int argc,char** argv)
 			}
 			else
 			{
+				// header recv area
 				int sender_fd = static_cast<int>(EventList[i].ident);
 				char buffer[20];
 				int offset = 0;
@@ -315,16 +336,20 @@ int main(int argc,char** argv)
 				{
 					std::cerr << "Connection Loss from " << i << "\n";
 					close(sender_fd);
-					delete_from_fdlist(fdlist,i,&fd_count);
+					//delete_from_fdlist(fdlist,sender_fd,&fd_count);
 					break;
 				}
 				if(header_res == 0)
 				{
 					std::cerr << "Connection closed from " << i << "\n";
 					close(sender_fd);
-					delete_from_fdlist(fdlist,i,&fd_count);
+					//delete_from_fdlist(fdlist,sender_fd,&fd_count);
 					break;
 				}
+				//header recv end
+
+
+				// deserialization area
 				uint16_t size;
 				memcpy(&size,buffer,2);
 				int bodysize = ntohs(size);
@@ -334,7 +359,7 @@ int main(int argc,char** argv)
 				{
 					std::cerr << "Connection closed from " << i << "\n";
 					close(sender_fd);
-					delete_from_fdlist(fdlist,i,&fd_count);
+					//delete_from_fdlist(fdlist,i,&fd_count);
 					break;	
 				}
 				uint16_t type;
@@ -360,6 +385,30 @@ int main(int argc,char** argv)
 				int ylocation = ntohs(y);
 				std::cout << "id: " << id << "\n";
 				std::cout << "Location: " << xlocation << "," << ylocation << "\n";
+				// deserialization end
+
+				// Producer area
+				auto task = std::make_unique<struct MovePacket>();
+				task->size = size;
+				task->type = type;
+				task->idlen = idlen;
+				task->x = x;
+				task->y = y;
+				memset(task->id,0,10);
+				memcpy(task->id,id,10);
+				std::cout << "packet packging done.\n";
+				std::unique_lock<std::mutex> lock(m);
+				if(taskQueue.size() == MAXBUFFERSIZE)
+					empty.wait(lock,[]{return isempty;});
+				taskQueue.push(std::move(task));
+				std::cout << "Producer got packet!" << "\n";
+				std::cout << "current queue size: " << taskQueue.size() << "\n";
+				isfill = true;
+				isempty = false;
+				fill.notify_one();
+				lock.unlock();
+				// Producer end
+
 			}
 
 		}
