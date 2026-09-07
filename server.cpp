@@ -36,14 +36,14 @@ std::mutex m;
 std::mutex list_m;
 std::condition_variable fill;
 std::condition_variable empty;
-bool isempty = false;
-bool isfill = false;
+// defrecated bool isempty = false;
+// defrecated bool isfill = false;
 
 /* PACKET STRUCTURE
 
-
-2byte: total packet size , 2byte : size of id , MAXIDLEN byte, 8 byte : location , xloc,yloc
-
+Header packet: 2byte Size , 2byte type
+Move pakcet: header packet + 2byte : size of id , MAXIDLEN byte, 8 byte : location , xloc,yloc
+Atk packet: header packet + 2byte: size of id, MAXIDLEN byte, (TBD)
 
 */
 
@@ -56,6 +56,11 @@ bool isfill = false;
 multi-threading on mac OS vscode
 using kqueue
 */
+
+/*  이런식으로 패킷을 하나하나 정의하는 건 각 패킷간의 결합도가 굉장히 높아짐
+	팩토리 역할을 할 헤더패킷 인터페이스를 정의하고, 그 하위부들을 따로 구현해줄
+	하위 클래스들을 구성해주는 방식인 팩토리 매서드가 적합해보임. */
+
 #pragma pack(push,1)
 struct MovePacket
 {
@@ -182,8 +187,6 @@ void* consumer(std::queue<std::unique_ptr<struct taskPacket>>& taskQueue,std::ve
 		taskQueue.pop();
 		lock.unlock();
 		empty.notify_one();
-		isfill = false;
-		isempty = true;
 		std::unique_lock<std::mutex>list_lock(list_m);
 		int fd = cpkt->tid;
 		for(const auto& i : fdlist)
@@ -198,8 +201,6 @@ void* consumer(std::queue<std::unique_ptr<struct taskPacket>>& taskQueue,std::ve
 		}
 		list_lock.unlock();
 		std::cout << "work done, current queue size:" << taskQueue.size() << "\n";
-		isempty = true;
-		isfill = false;
 	}
 }
 
@@ -358,9 +359,62 @@ int main(int argc,char** argv)
 				//header recv end
 				auto& clientbuffer = clients[sender_fd].buffer;
 				clientbuffer.insert(clientbuffer.end(), buffer, buffer+n);
-				while(clientbuffer.size() >= sizeof(MovePacket))
+				uint16_t curpktSize = 0;
+				uint16_t curpktType = 0;
+				if(clientbuffer.size() < 4)
+					continue;
+				memcpy(&curpktSize,clientbuffer.data(),2);
+				memcpy(&curpktType,clientbuffer.data() + 2,2);
+				curpktSize = ntohs(curpktSize);
+				curpktType = ntohs(curpktType);
+				std::cout << "Cur packet info: " << curpktSize << "," << curpktType << "\n";
+				if(clientbuffer.size() < curpktSize)
+					continue;
+				// pktsize == 40, type == 2 -> ATK packet (TBD)
+				// pktsize == 20, type == 1  -> Move packet 
+				if(curpktSize != 20 && curpktSize != 40) // Enum class refactoring needed.
 				{
-				char packetbuffer[sizeof(MovePacket)];
+					std::cerr<< "Invalid Packet Length from " << sender_fd;
+					close(sender_fd);
+					std::unique_lock<std::mutex> list_lock(list_m);
+					delete_from_fdlist(fdlist,sender_fd,&fd_count);
+					clients.erase(sender_fd);
+					list_lock.unlock();
+					break;
+				}
+				else
+				{
+					if(curpktSize == 20)
+					{
+						if(curpktType != 1)
+						{
+							std::cerr << "Malformed packet received from " << sender_fd;
+							close(sender_fd);
+							std::unique_lock<std::mutex> list_lock(list_m);
+							delete_from_fdlist(fdlist,sender_fd,&fd_count);
+							clients.erase(sender_fd);
+							list_lock.unlock();
+							break;
+						}
+					}
+					if(curpktSize == 40)
+					{
+						if(curpktType != 2)
+						{
+							std::cerr << "Malformed packet received from " << sender_fd;
+							close(sender_fd);
+							std::unique_lock<std::mutex> list_lock(list_m);
+							delete_from_fdlist(fdlist,sender_fd,&fd_count);
+							clients.erase(sender_fd);
+							list_lock.unlock();
+							break;
+						}
+					}
+				}
+
+				while(clientbuffer.size() >= curpktSize)
+				{
+				char packetbuffer[curpktSize];
 				memcpy(packetbuffer,clientbuffer.data(),sizeof(MovePacket));
 				clientbuffer.erase(clientbuffer.begin(),clientbuffer.begin()+sizeof(MovePacket));
 				// deserialization area
@@ -411,8 +465,6 @@ int main(int argc,char** argv)
 				consumeQueue.push(std::move(task));
 				std::cout << "Producer got packet!" << "\n";
 				std::cout << "current queue size: " << consumeQueue.size() << "\n";
-				isfill = true;
-				isempty = false;
 				fill.notify_one();
 				lock.unlock();
 				// Producer end
