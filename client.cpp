@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <thread>
+#include <chrono>
+
 
 #define MAXIDLEN 10
 #define PORT "3490"
@@ -107,6 +110,8 @@ int main(int argc, char** argv)
         std::cerr << "Usage: client id Hostip" << "\n";
         exit(1);
     }
+    uint16_t xloc = 10;
+    uint16_t yloc = 10;
     struct addrinfo hints,*servinfo,*p;
     int status;
     int sockfd;
@@ -139,18 +144,22 @@ int main(int argc, char** argv)
     }
     fcntl(sockfd, F_SETFL , O_NONBLOCK);
     freeaddrinfo(servinfo);
-    struct MovePacket playerPacket;
-    playerPacket.size = htons(20);
-    playerPacket.type = htons(1);
-    playerPacket.x = htons(10);
-    playerPacket.y = htons(10);
-    playerPacket.idlen = htons(strlen(argv[1]));
-    memset(playerPacket.id,'\0',sizeof(playerPacket.id));
-    memcpy(playerPacket.id,argv[1],strlen(argv[1]));
-    int bytesend = sendall(sockfd,reinterpret_cast<char*>(&playerPacket),20);
-    std::cout << "send byte: " << bytesend << "\n";
-    std::cout << "packet information:(" << ntohs(playerPacket.size) <<"," << ntohs(playerPacket.type) <<"," << ntohs(playerPacket.idlen) << "," << std::string(playerPacket.id,strnlen(playerPacket.id,10)) << "," << ntohs(playerPacket.x) << "," << ntohs(playerPacket.y) << ")\n";
-    std::cout << "Successfully connect to server.\n";
+    while(1)
+    {
+        struct MovePacket playerPacket;
+        playerPacket.size = htons(20);
+        playerPacket.type = htons(1);
+        playerPacket.x = htons(xloc);
+        playerPacket.y = htons(yloc);
+        playerPacket.idlen = htons(strlen(argv[1]));
+        memset(playerPacket.id,'\0',sizeof(playerPacket.id));
+        memcpy(playerPacket.id,argv[1],strlen(argv[1]));
+        int bytesend = sendall(sockfd,reinterpret_cast<char*>(&playerPacket),20);
+        std::cout << "send byte: " << bytesend << "\n";
+        std::cout << "packet information:(" << ntohs(playerPacket.size) <<"," << ntohs(playerPacket.type) <<"," << ntohs(playerPacket.idlen) << "," << std::string(playerPacket.id,strnlen(playerPacket.id,10)) << "," << ntohs(playerPacket.x) << "," << ntohs(playerPacket.y) << ")\n";
+        std::cout << "Successfully connect to server.\n";
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+    }
     close(sockfd);
     std::cout << "GoodBye!\n";
     return 0;
