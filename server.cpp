@@ -414,60 +414,60 @@ int main(int argc,char** argv)
 
 				while(clientbuffer.size() >= curpktSize)
 				{
-				char packetbuffer[curpktSize];
-				memcpy(packetbuffer,clientbuffer.data(),sizeof(MovePacket));
-				clientbuffer.erase(clientbuffer.begin(),clientbuffer.begin()+sizeof(MovePacket));
-				// deserialization area
-				uint16_t size;
-				memcpy(&size,packetbuffer,2);
-				offset+=2;
-				int bodysize = ntohs(size);
-				std::cout << "packet size: " << bodysize << "\n";
-				uint16_t type;
-				memcpy(&type,packetbuffer+offset,2);
-				offset+=2;
-				int ptype = ntohs(type);
-				uint16_t idlen;
-				memcpy(&idlen,packetbuffer+offset,2);
-				offset+=2;
-				int pidlen = ntohs(idlen);
-				char id[MAXIDLEN+1];
-				memset(&id,0,sizeof(id));
-				memcpy(&id,packetbuffer+offset,pidlen);
-				offset+=10;
-				id[pidlen] = '\0';
-				uint16_t x;
-				memcpy(&x,packetbuffer+offset,2);
-				offset+=2;
-				uint16_t y;
-				memcpy(&y,packetbuffer+offset,2);
-				offset+=2;
-				int xlocation = ntohs(x);
-				int ylocation = ntohs(y);
-				std::cout << "id: " << id << "\n";
-				std::cout << "Location: " << xlocation << "," << ylocation << "\n";
-				// deserialization end
+					char packetbuffer[curpktSize];
+					memcpy(packetbuffer,clientbuffer.data(),curpktSize);
+					clientbuffer.erase(clientbuffer.begin(),clientbuffer.begin()+curpktSize);
+					// deserialization area
+					uint16_t size;
+					memcpy(&size,packetbuffer,2);
+					offset+=2;
+					int bodysize = ntohs(size);
+					std::cout << "packet size: " << bodysize << "\n";
+					uint16_t type;
+					memcpy(&type,packetbuffer+offset,2);
+					offset+=2;
+					int ptype = ntohs(type);
+					uint16_t idlen;
+					memcpy(&idlen,packetbuffer+offset,2);
+					offset+=2;
+					int pidlen = ntohs(idlen);
+					char id[MAXIDLEN+1];
+					memset(&id,0,sizeof(id));
+					memcpy(&id,packetbuffer+offset,pidlen);
+					offset+=10;
+					id[pidlen] = '\0';
+					uint16_t x;
+					memcpy(&x,packetbuffer+offset,2);
+					offset+=2;
+					uint16_t y;
+					memcpy(&y,packetbuffer+offset,2);
+					offset+=2;
+					int xlocation = ntohs(x);
+					int ylocation = ntohs(y);
+					std::cout << "id: " << id << "\n";
+					std::cout << "Location: " << xlocation << "," << ylocation << "\n";
+					// deserialization end
 
-				// Producer area
-				auto task = std::make_unique<struct taskPacket>();
-				task->tid = sender_fd;
-				task->pkt.size = size;
-				task->pkt.type = type;
-				task->pkt.idlen = idlen;
-				task->pkt.x = x;
-				task->pkt.y = y;
-				memset(task->pkt.id,0,10);
-				memcpy(task->pkt.id,id,10);
-				std::cout << "packet packaging done.\n";
-				std::unique_lock<std::mutex> lock(m);
-				while(consumeQueue.size() == MAXBUFFERSIZE)
-					empty.wait(lock,[&]{return consumeQueue.empty();});
-				consumeQueue.push(std::move(task));
-				std::cout << "Producer got packet!" << "\n";
-				std::cout << "current queue size: " << consumeQueue.size() << "\n";
-				fill.notify_one();
-				lock.unlock();
-				// Producer end
+					// Producer area
+					auto task = std::make_unique<struct taskPacket>();
+					task->tid = sender_fd;
+					task->pkt.size = size;
+					task->pkt.type = type;
+					task->pkt.idlen = idlen;
+					task->pkt.x = x;
+					task->pkt.y = y;
+					memset(task->pkt.id,0,10);
+					memcpy(task->pkt.id,id,10);
+					std::cout << "packet packaging done.\n";
+					std::unique_lock<std::mutex> lock(m);
+					while(consumeQueue.size() == MAXBUFFERSIZE)
+						empty.wait(lock,[&]{return consumeQueue.empty();});
+					consumeQueue.push(std::move(task));
+					std::cout << "Producer got packet!" << "\n";
+					std::cout << "current queue size: " << consumeQueue.size() << "\n";
+					fill.notify_one();
+					lock.unlock();
+					// Producer end
 				}
 				
 			}
