@@ -71,17 +71,57 @@ struct MovePacket
 	uint16_t x;
 	uint16_t y;
 };
+struct AtkPacket
+{
+	uint16_t size;
+	uint16_t type;
+	uint16_t idlen;
+	char id[MAXIDLEN];
+	uint16_t skill_id;
+};
 
 struct taskPacket
 {
+	
 	struct MovePacket pkt;
 	int tid;
+};
+
+struct improvedTaskPacket
+{
+	union tasks
+	{
+		struct MovePacket mpkt;
+		struct AtkPacket apkt;
+	};
+	int tid;
+	
 };
 #pragma pack(pop)
 struct ClientSession
 {
 	std::vector<char> buffer;
+	std::vector<char> sendbuffer;
 };
+struct MovePacket getPacket(std::vector<char>& buffer, uint16_t pktSize, uint16_t pktType)
+{
+	int offset = 4;
+	struct MovePacket pkt;
+	pkt.size = pktSize;
+	pkt.type = pktType;
+	memcpy(&(pkt.idlen),buffer.data()+offset,2);
+	pkt.idlen = ntohs(pkt.idlen);
+	offset += 2;
+	memcpy(&(pkt.id) , buffer.data() + offset, MAXIDLEN);
+	offset += 10;
+	memcpy(&(pkt.x) , buffer.data()+offset,2);
+	pkt.x = ntohs(pkt.x);
+	offset += 2;
+	memcpy(&(pkt.y),buffer.data()+offset, 2);
+	pkt.y = ntohs(pkt.y);
+	offset +=2;
+	return pkt;
+}
 
 int add_to_fdlist(int fd,std::vector<int> fdlist, int* fd_count)
 {
@@ -175,7 +215,7 @@ void* get_in_addr(struct sockaddr* sa)
         return &(((struct sockaddr_in*)sa)->sin_addr);
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
-void* consumer(std::queue<std::unique_ptr<struct taskPacket>>& taskQueue,std::vector<int>& fdlist)
+void* consumer(std::queue<struct taskPacket>& taskQueue,std::vector<int>& fdlist)
 {
 	while(1)
 	{
@@ -183,17 +223,17 @@ void* consumer(std::queue<std::unique_ptr<struct taskPacket>>& taskQueue,std::ve
 		while(taskQueue.size() == 0)
 			fill.wait(lock,[&]{return !taskQueue.empty();});
 		std::cout << "worker get Packet!\n";
-		std::unique_ptr <struct taskPacket> cpkt = std::move(taskQueue.front());
+		struct taskPacket cpkt = taskQueue.front();
 		taskQueue.pop();
 		lock.unlock();
 		empty.notify_one();
 		std::unique_lock<std::mutex>list_lock(list_m);
-		int fd = cpkt->tid;
+		int fd = cpkt.tid;
 		for(const auto& i : fdlist)
 		{
 			if(i != fd)
 			{
-				if(sendall(i,reinterpret_cast<char*>(&(cpkt->pkt)),20)==-1)
+				if(sendall(i,reinterpret_cast<char*>(&(cpkt.pkt)),20)==-1)
 				{
 					continue;
 				}
@@ -227,7 +267,7 @@ int main(int argc,char** argv)
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
-	std::queue<std::unique_ptr<struct taskPacket>> consumeQueue;
+	std::queue<struct taskPacket> consumeQueue;
     if((status = getaddrinfo(NULL,PORT,&hints,&servinfo))==-1)
 	{
 		std::cerr << "getaddrinfo error: " << gai_strerror(status) << "\n";
@@ -331,10 +371,9 @@ int main(int argc,char** argv)
 			}
 			else
 			{
-				// header recv area
+				// recv area
 				int sender_fd = static_cast<int>(EventList[i].ident);
 				char buffer[MAXBUFFERSIZE];
-				int offset = 0;
 				int n = recv(sender_fd,buffer,sizeof(buffer),0);
 				if(n < 0)
 				{
@@ -356,68 +395,71 @@ int main(int argc,char** argv)
 					list_lock.unlock();
 					break;
 				}
-				//header recv end
 				auto& clientbuffer = clients[sender_fd].buffer;
 				clientbuffer.insert(clientbuffer.end(), buffer, buffer+n);
-				uint16_t curpktSize = 0;
-				uint16_t curpktType = 0;
-				if(clientbuffer.size() < 4)
-					continue;
-				memcpy(&curpktSize,clientbuffer.data(),2);
-				memcpy(&curpktType,clientbuffer.data() + 2,2);
-				curpktSize = ntohs(curpktSize);
-				curpktType = ntohs(curpktType);
-				std::cout << "Cur packet info: " << curpktSize << "," << curpktType << "\n";
-				if(clientbuffer.size() < curpktSize)
-					continue;
-				// pktsize == 40, type == 2 -> ATK packet (TBD)
-				// pktsize == 20, type == 1  -> Move packet 
-				if(curpktSize != 20 && curpktSize != 40) // Enum class refactoring needed.
+				// recv area end
+				while(true)
 				{
-					std::cerr<< "Invalid Packet Length from " << sender_fd;
-					close(sender_fd);
-					std::unique_lock<std::mutex> list_lock(list_m);
-					delete_from_fdlist(fdlist,sender_fd,&fd_count);
-					clients.erase(sender_fd);
-					list_lock.unlock();
-					break;
-				}
-				else
-				{
-					if(curpktSize == 20)
+					if(clientbuffer.size() < 4)
 					{
-						if(curpktType != 1)
+						break;
+					}
+					uint16_t curpktSize;
+					uint16_t curpktType;
+					memcpy(&curpktSize,clientbuffer.data(),2);
+					memcpy(&curpktType,clientbuffer.data()+2,2);
+					curpktSize = ntohs(curpktSize);
+					curpktType = ntohs(curpktType);
+					if(curpktSize != 20 && curpktSize != 40) // Enum class refactoring needed.
+					{
+						std::cerr<< "Invalid Packet Length from " << sender_fd;
+						close(sender_fd);
+						std::unique_lock<std::mutex> list_lock(list_m);
+						delete_from_fdlist(fdlist,sender_fd,&fd_count);
+						clients.erase(sender_fd);
+						list_lock.unlock();
+						break;
+					}
+					else
+					{
+						if(curpktSize == 20)
 						{
-							std::cerr << "Malformed packet received from " << sender_fd;
-							close(sender_fd);
-							std::unique_lock<std::mutex> list_lock(list_m);
-							delete_from_fdlist(fdlist,sender_fd,&fd_count);
-							clients.erase(sender_fd);
-							list_lock.unlock();
-							break;
+							if(curpktType != 1)
+							{
+								std::cerr << "Malformed packet received from " << sender_fd << "\n";
+								close(sender_fd);
+								std::unique_lock<std::mutex> list_lock(list_m);
+								delete_from_fdlist(fdlist,sender_fd,&fd_count);
+								clients.erase(sender_fd);
+								list_lock.unlock();
+								break;
+							}
+						}
+						if(curpktSize == 40)
+						{
+							if(curpktType != 2)
+							{
+								std::cerr << "Malformed packet received from " << sender_fd << "\n";
+								close(sender_fd);
+								std::unique_lock<std::mutex> list_lock(list_m);
+								delete_from_fdlist(fdlist,sender_fd,&fd_count);
+								clients.erase(sender_fd);
+								list_lock.unlock();
+								break;
+							}
 						}
 					}
-					if(curpktSize == 40)
+					if(clientbuffer.size() < curpktSize)
 					{
-						if(curpktType != 2)
-						{
-							std::cerr << "Malformed packet received from " << sender_fd;
-							close(sender_fd);
-							std::unique_lock<std::mutex> list_lock(list_m);
-							delete_from_fdlist(fdlist,sender_fd,&fd_count);
-							clients.erase(sender_fd);
-							list_lock.unlock();
-							break;
-						}
+						break;
 					}
-				}
-
-				while(clientbuffer.size() >= curpktSize)
-				{
+					struct MovePacket taskpkt = getPacket(clientbuffer,curpktSize,curpktType);
+					clientbuffer.erase(clientbuffer.begin(),clientbuffer.begin()+curpktSize);
+					/*	deprecated
+					int offset = 0;
 					char packetbuffer[curpktSize];
 					memcpy(packetbuffer,clientbuffer.data(),curpktSize);
 					clientbuffer.erase(clientbuffer.begin(),clientbuffer.begin()+curpktSize);
-					// deserialization area
 					uint16_t size;
 					memcpy(&size,packetbuffer,2);
 					offset+=2;
@@ -427,10 +469,21 @@ int main(int argc,char** argv)
 					memcpy(&type,packetbuffer+offset,2);
 					offset+=2;
 					int ptype = ntohs(type);
+					std::cout << "packet type: " << ptype << "\n";
 					uint16_t idlen;
 					memcpy(&idlen,packetbuffer+offset,2);
 					offset+=2;
 					int pidlen = ntohs(idlen);
+					if(pidlen > MAXIDLEN || pidlen <= 0)
+					{
+						std::cerr << "Malformed  ID packet received from " << sender_fd << "\n";
+						close(sender_fd);
+						std::unique_lock<std::mutex> list_lock(list_m);
+						delete_from_fdlist(fdlist,sender_fd,&fd_count);
+						clients.erase(sender_fd);
+						list_lock.unlock();
+						break;
+					}
 					char id[MAXIDLEN+1];
 					memset(&id,0,sizeof(id));
 					memcpy(&id,packetbuffer+offset,pidlen);
@@ -446,23 +499,16 @@ int main(int argc,char** argv)
 					int ylocation = ntohs(y);
 					std::cout << "id: " << id << "\n";
 					std::cout << "Location: " << xlocation << "," << ylocation << "\n";
-					// deserialization end
+					*/
 
 					// Producer area
-					auto task = std::make_unique<struct taskPacket>();
-					task->tid = sender_fd;
-					task->pkt.size = size;
-					task->pkt.type = type;
-					task->pkt.idlen = idlen;
-					task->pkt.x = x;
-					task->pkt.y = y;
-					memset(task->pkt.id,0,10);
-					memcpy(task->pkt.id,id,10);
 					std::cout << "packet packaging done.\n";
 					std::unique_lock<std::mutex> lock(m);
-					while(consumeQueue.size() == MAXBUFFERSIZE)
-						empty.wait(lock,[&]{return consumeQueue.empty();});
-					consumeQueue.push(std::move(task));
+					empty.wait(lock,[&]{return consumeQueue.size() < MAXBUFFERSIZE;});
+					struct taskPacket consumepkt;
+					consumepkt.pkt = taskpkt;
+					consumepkt.tid = sender_fd;
+					consumeQueue.push(consumepkt);
 					std::cout << "Producer got packet!" << "\n";
 					std::cout << "current queue size: " << consumeQueue.size() << "\n";
 					fill.notify_one();
