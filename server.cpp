@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <thread>
+#include <unordered_map>
 
 
 #define MAXEVENTS 20
@@ -35,14 +36,14 @@ std::mutex m;
 std::mutex list_m;
 std::condition_variable fill;
 std::condition_variable empty;
-bool isempty = false;
-bool isfill = false;
+// defrecated bool isempty = false;
+// defrecated bool isfill = false;
 
 /* PACKET STRUCTURE
 
-
-2byte: total packet size , 2byte : size of id , MAXIDLEN byte, 8 byte : location , xloc,yloc
-
+Header packet: 2byte Size , 2byte type
+Move pakcet: header packet + 2byte : size of id , MAXIDLEN byte, 8 byte : location , xloc,yloc
+Atk packet: header packet + 2byte: size of id, MAXIDLEN byte, (TBD)
 
 */
 
@@ -54,27 +55,12 @@ bool isfill = false;
 
 multi-threading on mac OS vscode
 using kqueue
-
-struct taskstruct
-{
-    int sender_fd;
-    std::string packet;
-    int len;
-    int* fd_list;
-    int* fd_count;
-};
-
-
-struct consumeStruct
-{
-    int tid;
-    int* packet_num;
-    std::queue<std::unique_ptr<struct tasksturct>> t_queue;
-};
-
-
-packet structure: 2byte 2byte 2byte 10byte 2byte 2byte -> 20byte
 */
+
+/*  이런식으로 패킷을 하나하나 정의하는 건 각 패킷간의 결합도가 굉장히 높아짐
+	팩토리 역할을 할 헤더패킷 인터페이스를 정의하고, 그 하위부들을 따로 구현해줄
+	하위 클래스들을 구성해주는 방식인 팩토리 매서드가 적합해보임. */
+
 #pragma pack(push,1)
 struct MovePacket
 {
@@ -85,8 +71,58 @@ struct MovePacket
 	uint16_t x;
 	uint16_t y;
 };
+struct AtkPacket
+{
+	uint16_t size;
+	uint16_t type;
+	uint16_t idlen;
+	char id[MAXIDLEN];
+	uint16_t skill_id;
+};
+
+struct taskPacket
+{
+	
+	struct MovePacket pkt;
+	int tid;
+};
+
+struct improvedTaskPacket
+{
+	union tasks
+	{
+		struct MovePacket mpkt;
+		struct AtkPacket apkt;
+	};
+	int tid;
+	
+};
 #pragma pack(pop)
-/*
+struct ClientSession
+{
+	std::vector<char> buffer;
+	std::vector<char> sendbuffer;
+};
+struct MovePacket getPacket(std::vector<char>& buffer, uint16_t pktSize, uint16_t pktType)
+{
+	int offset = 4;
+	struct MovePacket pkt;
+	pkt.size = pktSize;
+	pkt.type = pktType;
+	memcpy(&(pkt.idlen),buffer.data()+offset,2);
+	pkt.idlen = ntohs(pkt.idlen);
+	offset += 2;
+	memcpy(&(pkt.id) , buffer.data() + offset, MAXIDLEN);
+	offset += 10;
+	memcpy(&(pkt.x) , buffer.data()+offset,2);
+	pkt.x = ntohs(pkt.x);
+	offset += 2;
+	memcpy(&(pkt.y),buffer.data()+offset, 2);
+	pkt.y = ntohs(pkt.y);
+	offset +=2;
+	return pkt;
+}
+
 int add_to_fdlist(int fd,std::vector<int> fdlist, int* fd_count)
 {
     int size = fdlist.capacity();
@@ -111,7 +147,7 @@ void delete_from_fdlist(std::vector<int> fdlist, int idx,int* fd_count)
 		return;
 	std::swap(fdlist[idx] , fdlist[(*fd_count) - 1]);
 }
-*/
+
 int sendall(int s,char* packet,int len)
 {
 	int total = 0;
@@ -140,7 +176,7 @@ int sendall(int s,char* packet,int len)
 	}
 	return n == -1 ? -1 : total;
 }
-
+// Deprecated
 int recvall(int s,char* buffer,int len)
 {
 	int total = 0;
@@ -179,21 +215,32 @@ void* get_in_addr(struct sockaddr* sa)
         return &(((struct sockaddr_in*)sa)->sin_addr);
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
-
-void* consumer(std::queue<std::unique_ptr<MovePacket>>& taskQueue)
+void* consumer(std::queue<struct taskPacket>& taskQueue,std::vector<int>& fdlist)
 {
 	while(1)
 	{
 		std::unique_lock<std::mutex>lock(m);
 		while(taskQueue.size() == 0)
-			fill.wait(lock,[]{return isfill;});
+			fill.wait(lock,[&]{return !taskQueue.empty();});
 		std::cout << "worker get Packet!\n";
+		struct taskPacket cpkt = taskQueue.front();
 		taskQueue.pop();
-		std::cout << "work done, current queue size:" << taskQueue.size() << "\n";
-		isempty = true;
-		isfill = false;
-		empty.notify_one();
 		lock.unlock();
+		empty.notify_one();
+		std::unique_lock<std::mutex>list_lock(list_m);
+		int fd = cpkt.tid;
+		for(const auto& i : fdlist)
+		{
+			if(i != fd)
+			{
+				if(sendall(i,reinterpret_cast<char*>(&(cpkt.pkt)),20)==-1)
+				{
+					continue;
+				}
+			}
+		}
+		list_lock.unlock();
+		std::cout << "work done, current queue size:" << taskQueue.size() << "\n";
 	}
 }
 
@@ -209,23 +256,18 @@ int main(int argc,char** argv)
 	int listener_fd;
 	int fd_count = 0;
 	int taskCount = 0;
-	uint32_t uniquePlayerId = 1;
-    char ipv6str[INET6_ADDRSTRLEN];
-    char ipv4str[INET_ADDRSTRLEN];
+
 	char s[INET6_ADDRSTRLEN];
 	std::vector<int> fdlist(5);
-
     struct addrinfo hints, *servinfo, *p;
 	struct sockaddr_storage their_addr;
 	socklen_t sin_size;
-	
-
+	std::unordered_map<int,struct ClientSession> clients;
 	memset(&hints,0,sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_PASSIVE;
-	std::queue<std::unique_ptr<struct MovePacket>> taskQueue;
-	std::thread t(consumer,std::ref(taskQueue));
+	std::queue<struct taskPacket> consumeQueue;
     if((status = getaddrinfo(NULL,PORT,&hints,&servinfo))==-1)
 	{
 		std::cerr << "getaddrinfo error: " << gai_strerror(status) << "\n";
@@ -261,12 +303,12 @@ int main(int argc,char** argv)
 	}
 	fcntl(listener_fd, F_SETFL, O_NONBLOCK);
 	std::cout << "server: waiting for connections..\n";
-	/*if(add_to_fdlist(listener_fd,fdlist,&fd_count) == -1)
+	if(add_to_fdlist(listener_fd,fdlist,&fd_count) == -1)
 	{
 		std::cerr << "fail to get fdlist.\n";
 		exit(1);
 	}
-	*/
+	
 	freeaddrinfo(servinfo);
 	int kq = kqueue();
 	if(kq == -1)
@@ -282,6 +324,8 @@ int main(int argc,char** argv)
 		std::cerr << "kevent register failed.\n";
 		exit(1);
 	}
+	std::thread t(consumer,std::ref(consumeQueue),std::ref(fdlist));
+	std::thread t2(consumer,std::ref(consumeQueue),std::ref(fdlist));
 
 	std::cout << "echo server start.\n";
 	
@@ -314,101 +358,164 @@ int main(int argc,char** argv)
 					}
 				}
 				fcntl(newfd,F_SETFL,O_NONBLOCK);
-				//add_to_fdlist(newfd,fdlist,&fd_count);
+				std::unique_lock<std::mutex> list_lock(list_m);
+				add_to_fdlist(newfd,fdlist,&fd_count);
+				list_lock.unlock();
 				EV_SET(&ChangeList,newfd,EVFILT_READ,EV_ADD | EV_CLEAR , 0,0,NULL);
 				if(kevent(kq,&ChangeList,1,NULL,0,NULL) == -1)
 				{
 					std::cerr << "client kqueue fail.\n";
 					close(newfd);
 				}
-				
-
+				clients[newfd] = ClientSession{};
 			}
 			else
 			{
-				// header recv area
+				// recv area
 				int sender_fd = static_cast<int>(EventList[i].ident);
-				char buffer[20];
-				int offset = 0;
-				int header_res = recvall(sender_fd,buffer,2);
-				offset+=2;
-				if(header_res < 0)
+				char buffer[MAXBUFFERSIZE];
+				int n = recv(sender_fd,buffer,sizeof(buffer),0);
+				if(n < 0)
 				{
 					std::cerr << "Connection Loss from " << i << "\n";
 					close(sender_fd);
-					//delete_from_fdlist(fdlist,sender_fd,&fd_count);
+					std::unique_lock<std::mutex> list_lock(list_m);
+					delete_from_fdlist(fdlist,sender_fd,&fd_count);
+					clients.erase(sender_fd);
+					list_lock.unlock();
 					break;
 				}
-				if(header_res == 0)
+				if(n == 0)
 				{
 					std::cerr << "Connection closed from " << i << "\n";
 					close(sender_fd);
-					//delete_from_fdlist(fdlist,sender_fd,&fd_count);
+					std::unique_lock<std::mutex> list_lock(list_m);
+					delete_from_fdlist(fdlist,sender_fd,&fd_count);
+					clients.erase(sender_fd);
+					list_lock.unlock();
 					break;
 				}
-				//header recv end
-
-
-				// deserialization area
-				uint16_t size;
-				memcpy(&size,buffer,2);
-				int bodysize = ntohs(size);
-				std::cout << "packet size: " << bodysize << "\n";
-				int body_res = recvall(sender_fd,buffer+offset, bodysize-2);
-				if(body_res <= 0)
+				auto& clientbuffer = clients[sender_fd].buffer;
+				clientbuffer.insert(clientbuffer.end(), buffer, buffer+n);
+				// recv area end
+				while(true)
 				{
-					std::cerr << "Connection closed from " << i << "\n";
-					close(sender_fd);
-					//delete_from_fdlist(fdlist,i,&fd_count);
-					break;	
+					if(clientbuffer.size() < 4)
+					{
+						break;
+					}
+					uint16_t curpktSize;
+					uint16_t curpktType;
+					memcpy(&curpktSize,clientbuffer.data(),2);
+					memcpy(&curpktType,clientbuffer.data()+2,2);
+					curpktSize = ntohs(curpktSize);
+					curpktType = ntohs(curpktType);
+					if(curpktSize != 20 && curpktSize != 40) // Enum class refactoring needed.
+					{
+						std::cerr<< "Invalid Packet Length from " << sender_fd;
+						close(sender_fd);
+						std::unique_lock<std::mutex> list_lock(list_m);
+						delete_from_fdlist(fdlist,sender_fd,&fd_count);
+						clients.erase(sender_fd);
+						list_lock.unlock();
+						break;
+					}
+					else
+					{
+						if(curpktSize == 20)
+						{
+							if(curpktType != 1)
+							{
+								std::cerr << "Malformed packet received from " << sender_fd << "\n";
+								close(sender_fd);
+								std::unique_lock<std::mutex> list_lock(list_m);
+								delete_from_fdlist(fdlist,sender_fd,&fd_count);
+								clients.erase(sender_fd);
+								list_lock.unlock();
+								break;
+							}
+						}
+						if(curpktSize == 40)
+						{
+							if(curpktType != 2)
+							{
+								std::cerr << "Malformed packet received from " << sender_fd << "\n";
+								close(sender_fd);
+								std::unique_lock<std::mutex> list_lock(list_m);
+								delete_from_fdlist(fdlist,sender_fd,&fd_count);
+								clients.erase(sender_fd);
+								list_lock.unlock();
+								break;
+							}
+						}
+					}
+					if(clientbuffer.size() < curpktSize)
+					{
+						break;
+					}
+					struct MovePacket taskpkt = getPacket(clientbuffer,curpktSize,curpktType);
+					clientbuffer.erase(clientbuffer.begin(),clientbuffer.begin()+curpktSize);
+					/*	deprecated
+					int offset = 0;
+					char packetbuffer[curpktSize];
+					memcpy(packetbuffer,clientbuffer.data(),curpktSize);
+					clientbuffer.erase(clientbuffer.begin(),clientbuffer.begin()+curpktSize);
+					uint16_t size;
+					memcpy(&size,packetbuffer,2);
+					offset+=2;
+					int bodysize = ntohs(size);
+					std::cout << "packet size: " << bodysize << "\n";
+					uint16_t type;
+					memcpy(&type,packetbuffer+offset,2);
+					offset+=2;
+					int ptype = ntohs(type);
+					std::cout << "packet type: " << ptype << "\n";
+					uint16_t idlen;
+					memcpy(&idlen,packetbuffer+offset,2);
+					offset+=2;
+					int pidlen = ntohs(idlen);
+					if(pidlen > MAXIDLEN || pidlen <= 0)
+					{
+						std::cerr << "Malformed  ID packet received from " << sender_fd << "\n";
+						close(sender_fd);
+						std::unique_lock<std::mutex> list_lock(list_m);
+						delete_from_fdlist(fdlist,sender_fd,&fd_count);
+						clients.erase(sender_fd);
+						list_lock.unlock();
+						break;
+					}
+					char id[MAXIDLEN+1];
+					memset(&id,0,sizeof(id));
+					memcpy(&id,packetbuffer+offset,pidlen);
+					offset+=10;
+					id[pidlen] = '\0';
+					uint16_t x;
+					memcpy(&x,packetbuffer+offset,2);
+					offset+=2;
+					uint16_t y;
+					memcpy(&y,packetbuffer+offset,2);
+					offset+=2;
+					int xlocation = ntohs(x);
+					int ylocation = ntohs(y);
+					std::cout << "id: " << id << "\n";
+					std::cout << "Location: " << xlocation << "," << ylocation << "\n";
+					*/
+
+					// Producer area
+					std::cout << "packet packaging done.\n";
+					std::unique_lock<std::mutex> lock(m);
+					empty.wait(lock,[&]{return consumeQueue.size() < MAXBUFFERSIZE;});
+					struct taskPacket consumepkt;
+					consumepkt.pkt = taskpkt;
+					consumepkt.tid = sender_fd;
+					consumeQueue.push(consumepkt);
+					std::cout << "Producer got packet!" << "\n";
+					std::cout << "current queue size: " << consumeQueue.size() << "\n";
+					fill.notify_one();
+					lock.unlock();
+					// Producer end
 				}
-				uint16_t type;
-				memcpy(&type,buffer+offset,2);
-				offset+=2;
-				int ptype = ntohs(type);
-				uint16_t idlen;
-				memcpy(&idlen,buffer+offset,2);
-				offset+=2;
-				int pidlen = ntohs(idlen);
-				char id[MAXIDLEN+1];
-				memset(&id,0,sizeof(id));
-				memcpy(&id,buffer+offset,pidlen);
-				offset+=10;
-				id[pidlen] = '\0';
-				uint16_t x;
-				memcpy(&x,buffer+offset,2);
-				offset+=2;
-				uint16_t y;
-				memcpy(&y,buffer+offset,2);
-				offset+=2;
-				int xlocation = ntohs(x);
-				int ylocation = ntohs(y);
-				std::cout << "id: " << id << "\n";
-				std::cout << "Location: " << xlocation << "," << ylocation << "\n";
-				// deserialization end
-
-				// Producer area
-				auto task = std::make_unique<struct MovePacket>();
-				task->size = size;
-				task->type = type;
-				task->idlen = idlen;
-				task->x = x;
-				task->y = y;
-				memset(task->id,0,10);
-				memcpy(task->id,id,10);
-				std::cout << "packet packging done.\n";
-				std::unique_lock<std::mutex> lock(m);
-				if(taskQueue.size() == MAXBUFFERSIZE)
-					empty.wait(lock,[]{return isempty;});
-				taskQueue.push(std::move(task));
-				std::cout << "Producer got packet!" << "\n";
-				std::cout << "current queue size: " << taskQueue.size() << "\n";
-				isfill = true;
-				isempty = false;
-				fill.notify_one();
-				lock.unlock();
-				// Producer end
-
+				
 			}
 
 		}
